@@ -1,170 +1,185 @@
-import streamlit as st
 import os
-from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores.azure_cognitive_search import AzureCognitiveSearch
-from langchain.chains import ConversationalRetrievalChain
-from langchain.memory import ConversationBufferMemory
-import uuid
-from typing import List
-import tempfile
-from pathlib import Path
+import streamlit as st
+import base64
+from openai import AzureOpenAI
 
-# Page config
-st.set_page_config(
-    page_title="Document Chat",
-    page_icon="📚",
-    layout="wide"
-)
+# Page configuration
+st.set_page_config(page_title="Meeting Minutes AI Assistant", page_icon="📝", layout="wide")
 
-# Initialize session state
-if "conversation" not in st.session_state:
-    st.session_state.conversation = None
-if "chat_history" not in st.session_state:
+# App title
+st.title("Meeting Minutes AI Assistant")
+st.markdown("Ask questions about your meeting minutes documents.")
+
+# Initialize session state variables
+if 'chat_history' not in st.session_state:
     st.session_state.chat_history = []
-if "vector_store" not in st.session_state:
-    st.session_state.vector_store = None
 
-def initialize_vector_store(openai_api_key: str):
-    """Initialize Azure Cognitive Search vector store"""
-    try:
-        embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
-        vector_store = AzureCognitiveSearch(
-            azure_search_endpoint=os.getenv("AZURE_COGNITIVE_SEARCH_ENDPOINT"),
-            azure_search_key=os.getenv("AZURE_COGNITIVE_SEARCH_API_KEY"),
-            index_name=os.getenv("AZURE_COGNITIVE_SEARCH_INDEX_NAME"),
-            embedding_function=embeddings.embed_query,
-        )
-        return vector_store
-    except Exception as e:
-        st.error(f"Error initializing vector store: {str(e)}")
-        return None
-
-def process_document(file, vector_store):
-    """Process uploaded document and add to vector store"""
-    try:
-        # Create temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
-            tmp_file.write(file.getvalue())
-            file_path = tmp_file.name
-
-        # Extract text (you may want to enhance this based on your needs)
-        text = ""
-        with open(file_path, 'rb') as pdf_file:
-            # Add your PDF text extraction logic here
-            text = pdf_file.read().decode('utf-8', errors='ignore')
-
-        # Split text into chunks
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
-            length_function=len
-        )
-        chunks = text_splitter.split_text(text)
-
-        # Add to vector store
-        vector_store.add_texts(
-            texts=chunks,
-            metadatas=[{"source": file.name, "chunk_id": str(i)} for i in range(len(chunks))]
-        )
-
-        # Cleanup
-        os.unlink(file_path)
-        return True
-    except Exception as e:
-        st.error(f"Error processing document: {str(e)}")
-        return False
-
-def initialize_conversation(vector_store, openai_api_key: str):
-    """Initialize the conversation chain"""
-    llm = ChatOpenAI(
-        temperature=0,
-        model_name="gpt-4",
-        openai_api_key=openai_api_key
-    )
-    
-    memory = ConversationBufferMemory(
-        memory_key="chat_history",
-        return_messages=True
-    )
-    
-    conversation = ConversationalRetrievalChain.from_llm(
-        llm=llm,
-        retriever=vector_store.as_retriever(
-            search_kwargs={"k": 3}
-        ),
-        memory=memory,
-        verbose=True
-    )
-    
-    return conversation
-
-# Sidebar for API keys and configuration
+# Sidebar for Azure OpenAI configuration
 with st.sidebar:
-    st.title("Configuration")
+    st.header("Configuration")
     
-    # OpenAI API Key input
-    openai_api_key = st.text_input(
-        "OpenAI API Key",
-        type="password",
-        help="Enter your OpenAI API key here. It will not be stored.",
-        key="openai_api_key"
+    # Azure OpenAI Configuration
+    azure_endpoint = st.text_input("Azure OpenAI Endpoint", value=os.getenv("ENDPOINT_URL", "https://momgptista.openai.azure.com/"), key="azure_endpoint")
+    azure_deployment = st.text_input("Azure OpenAI Deployment Name", value=os.getenv("DEPLOYMENT_NAME", "gpt-4o"), key="azure_deployment")
+    azure_api_key = st.text_input("Azure OpenAI API Key", value=os.getenv("AZURE_OPENAI_API_KEY", ""), type="password", key="azure_api_key")
+    
+    # Azure AI Search Configuration
+    search_endpoint = st.text_input("Azure AI Search Endpoint", value=os.getenv("SEARCH_ENDPOINT", "https://momaisearchista.search.windows.net"), key="search_endpoint")
+    search_key = st.text_input("Azure AI Search Key", value=os.getenv("SEARCH_KEY", ""), type="password", key="search_key")
+    search_index = st.text_input("Azure AI Search Index Name", value=os.getenv("SEARCH_INDEX_NAME", "firstindex"), key="search_index")
+    
+    # Search Controls
+    st.subheader("Search Controls")
+    
+    # Strictness slider (1-5)
+    strictness = st.slider(
+        "Strictness (1-5)", 
+        min_value=1, 
+        max_value=5, 
+        value=3, 
+        help="Controls how strictly the model adheres to the retrieved content. Higher values = stricter adherence to data."
     )
     
-    # Document upload
-    st.subheader("Upload Documents")
-    uploaded_files = st.file_uploader(
-        "Choose PDF files",
-        type=["pdf"],
-        accept_multiple_files=True
+    # Retrieved documents slider (3-20)
+    top_n_documents = st.slider(
+        "Retrieved documents (3-20)", 
+        min_value=3, 
+        max_value=20, 
+        value=5, 
+        help="Number of documents to retrieve from the search index."
     )
+    
+    # System prompt
+    system_prompt = st.text_area(
+        "System Prompt",
+        value="""Follow the instructions below to respond exclusively using information found in the meeting minutes PDF files provided by the user. Only reference these documents explicitly. If the user requires information outside of these PDFs, you may politely indicate that the answer cannot be found within the provided documents.
 
-# Main content
-st.title("💬 Chat with Your Documents")
+# Instructions for Task
 
-# Initialize vector store if API key is provided
-if openai_api_key:
-    if st.session_state.vector_store is None:
-        with st.spinner("Initializing vector store..."):
-            st.session_state.vector_store = initialize_vector_store(openai_api_key)
+Answer the user's queries by extracting information from the meeting minutes PDFs that have been provided. Do not introduce external information or assumptions. If information requested by the user is not available within the provided meeting minutes, explicitly state that the information cannot be found within the provided files.
 
-    # Process uploaded documents
-    if uploaded_files:
-        with st.spinner("Processing documents..."):
-            for file in uploaded_files:
-                if process_document(file, st.session_state.vector_store):
-                    st.success(f"Successfully processed {file.name}")
+# Steps
 
-    # Initialize conversation if needed
-    if st.session_state.conversation is None and st.session_state.vector_store is not None:
-        st.session_state.conversation = initialize_conversation(
-            st.session_state.vector_store,
-            openai_api_key
-        )
+1. Process the content of the provided meeting minutes PDFs.
+   - Extract and interpret relevant sections based on the user's query.
+2. Reference specific details from the meeting minutes to support your response.
+   - Where applicable, cite page numbers, sections, or headings from the PDF to ensure clarity and traceability.
+3. If the user's question cannot be answered using the PDFs:
+   - Clearly state: "This information is not available in the meeting minutes provided."
+4. Focus on clarity and conciseness in your responses.
 
-    # Chat interface
-    if st.session_state.conversation is not None:
-        # Display chat messages
-        for message in st.session_state.chat_history:
-            with st.chat_message(message["role"]):
-                st.write(message["content"])
+# Output Format
 
-        # Chat input
-        if prompt := st.chat_input("Ask a question about your documents"):
-            # Add user message to chat history
-            st.session_state.chat_history.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.write(prompt)
+1. Begin the response with a direct and clear answer to the user's query.
+2. For supported answers, provide:
+   - Key information from the meeting minutes.
+   - Any relevant page numbers, headings, or contextual references from the PDFs.
+3. For unsupported answers:
+   - State, "This information is not available in the meeting minutes provided."
+4. Do not output content in code blocks unless explicitly requested.
+""",
+        height=300,
+    )
+    
+    # Clear chat history button
+    if st.button("Clear Chat History"):
+        st.session_state.chat_history = []
+        st.experimental_rerun()
 
-            # Get AI response
-            with st.chat_message("assistant"):
-                with st.spinner("Thinking..."):
-                    response = st.session_state.conversation({"question": prompt})
-                    st.write(response["answer"])
-                    st.session_state.chat_history.append(
-                        {"role": "assistant", "content": response["answer"]}
-                    )
+# Display chat history
+chat_container = st.container()
+with chat_container:
+    for message in st.session_state.chat_history:
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
 
-else:
-    st.warning("Please enter your OpenAI API key in the sidebar to start.")
+# User input
+user_input = st.chat_input("Ask a question about your meeting minutes...")
+
+# Process user input
+if user_input:
+    # Add user message to chat history
+    st.session_state.chat_history.append({"role": "user", "content": user_input})
+    
+    # Display user message
+    with st.chat_message("user"):
+        st.write(user_input)
+    
+    # Display assistant thinking
+    with st.chat_message("assistant"):
+        message_placeholder = st.empty()
+        message_placeholder.write("Thinking...")
+        
+        try:
+            # Initialize Azure OpenAI client
+            client = AzureOpenAI(
+                azure_endpoint=azure_endpoint,
+                api_key=azure_api_key,
+                api_version="2024-05-01-preview"
+            )
+            
+            # Prepare the chat messages
+            messages = [
+                {
+                    "role": "system",
+                    "content": system_prompt
+                }
+            ]
+            
+            # Add chat history to messages (limit to last 10 messages)
+            for msg in st.session_state.chat_history[-10:]:
+                messages.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
+                
+            # Generate completion
+            completion = client.chat.completions.create(
+                model=azure_deployment,
+                messages=messages,
+                max_tokens=4096,
+                temperature=0.3,
+                top_p=0.98,
+                frequency_penalty=0,
+                presence_penalty=0.2,
+                stop=None,
+                stream=False,
+                extra_body={
+                    "data_sources": [{
+                        "type": "azure_search",
+                        "parameters": {
+                            "endpoint": search_endpoint,
+                            "index_name": search_index,
+                            "semantic_configuration": "default",
+                            "query_type": "simple",
+                            "fields_mapping": {},
+                            "in_scope": True,
+                            "role_information": system_prompt,
+                            "filter": None,
+                            "strictness": strictness,  # Using the slider value
+                            "top_n_documents": top_n_documents,  # Using the slider value
+                            "authentication": {
+                                "type": "api_key",
+                                "key": search_key
+                            }
+                        }
+                    }]
+                }
+            )
+            
+            # Get the response
+            response = completion.choices[0].message.content
+            
+            # Update the placeholder with the response
+            message_placeholder.write(response)
+            
+            # Add assistant message to chat history
+            st.session_state.chat_history.append({"role": "assistant", "content": response})
+            
+        except Exception as e:
+            message_placeholder.error(f"Error: {str(e)}")
+            st.session_state.chat_history.append({"role": "assistant", "content": f"Error: {str(e)}"})
+
+# Add a footer
+st.markdown("---")
+st.markdown("Powered by Azure OpenAI and Azure AI Search")
