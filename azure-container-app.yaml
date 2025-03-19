@@ -1,32 +1,30 @@
-name: document-chat-app
-location: eastus
-properties:
-  managedEnvironmentId: /subscriptions/{subscription-id}/resourceGroups/{resource-group}/providers/Microsoft.App/managedEnvironments/{environment-name}
-  configuration:
-    ingress:
-      external: true
-      targetPort: 8501
-    secrets:
-      - name: openai-api-key
-        value: {your-openai-api-key}
-      - name: azure-search-key
-        value: {your-azure-search-key}
-  template:
-    containers:
-      - name: document-chat
-        image: {your-container-registry}/document-chat:latest
-        env:
-          - name: OPENAI_API_KEY
-            secretRef: openai-api-key
-          - name: AZURE_COGNITIVE_SEARCH_ENDPOINT
-            value: https://{your-search-service}.search.windows.net
-          - name: AZURE_COGNITIVE_SEARCH_API_KEY
-            secretRef: azure-search-key
-          - name: AZURE_COGNITIVE_SEARCH_INDEX_NAME
-            value: documents
-        resources:
-          cpu: 1.0
-          memory: 2Gi
-    scale:
-      minReplicas: 1
-      maxReplicas: 10 
+name: Build and deploy Python app to Azure Web App
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.9'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Deploy to Azure Web App
+      uses: azure/webapps-deploy@v2
+      with:
+        app-name: 'your-app-name'
+        publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
